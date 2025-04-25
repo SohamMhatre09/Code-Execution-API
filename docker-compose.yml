@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  code-execution-api:
+    build: .
+    container_name: code-execution-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - code-environments:/app/environments
+    restart: unless-stopped
+    # For debugging, uncomment these lines:
+    # environment:
+    #   - PYTHONUNBUFFERED=1
+
+volumes:
+  code-environments:

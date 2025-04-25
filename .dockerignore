@@ -1,0 +1,30 @@
+# Virtual environments
+venv/
+.env/
+env/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local environment files
+.env
+.env.local
+
+# Git
+.git
+.gitignore
+
+# Environments directory (will be created in container)
+environments/
+
+# Docker files themselves
+Dockerfile
+docker-compose.yml
+
+# Editor directories and files
+.idea/
+.vscode/
+*.swp
+*.swo
