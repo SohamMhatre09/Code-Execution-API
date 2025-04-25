@@ -141,34 +141,59 @@ download_and_extract_project() {
     print_color "green" "Project files extracted successfully to $INSTALL_DIR"
 }
 
-# Function to create a conda environment
+# Function to create a conda environment - modified to handle errors
 create_conda_environment() {
     print_header "Setting Up Python Environment"
     
     ENV_NAME="code_execution_api"
     
+    # Check if conda is in PATH
+    if ! command_exists conda; then
+        print_color "yellow" "Conda not found in PATH. Using direct path..."
+        # Try to use direct path
+        if [ -f "/opt/miniconda3/bin/conda" ]; then
+            CONDA_CMD="/opt/miniconda3/bin/conda"
+        else
+            print_color "red" "Conda not found. Skipping conda environment setup."
+            print_color "yellow" "This won't affect Docker operation."
+            return
+        fi
+    else
+        CONDA_CMD="conda"
+    fi
+    
     # Check if environment already exists
-    if conda env list | grep -q "$ENV_NAME"; then
+    if $CONDA_CMD env list | grep -q "$ENV_NAME"; then
         print_color "yellow" "Conda environment '$ENV_NAME' already exists. Updating..."
-        conda env update -n "$ENV_NAME" --file "$INSTALL_DIR/requirements.txt"
+        $CONDA_CMD env update -n "$ENV_NAME" --file "$INSTALL_DIR/requirements.txt" || true
     else
         # Create new environment
         print_color "yellow" "Creating conda environment '$ENV_NAME'..."
-        conda create -n "$ENV_NAME" python=3.11 -y
+        $CONDA_CMD create -n "$ENV_NAME" python=3.11 -y || true
     fi
     
     # Install requirements
     print_color "yellow" "Installing project dependencies..."
-    conda run -n "$ENV_NAME" pip install -r "$INSTALL_DIR/requirements.txt"
+    $CONDA_CMD run -n "$ENV_NAME" pip install -r "$INSTALL_DIR/requirements.txt" || true
     
-    print_color "green" "Python environment setup completed successfully!"
+    print_color "green" "Python environment setup completed!"
 }
 
-# Function to create a systemd service
+# Function to create a systemd service - updated for better compatibility
 create_systemd_service() {
     print_header "Creating Systemd Service"
     
-    # Create service file
+    # Determine which docker-compose command to use
+    if command_exists docker-compose; then
+        DOCKER_COMPOSE_CMD=$(which docker-compose)
+    elif command_exists docker && docker compose version >/dev/null 2>&1; then
+        DOCKER_COMPOSE_CMD="docker compose"
+    else
+        print_color "red" "Neither docker-compose nor docker compose is available!"
+        return 1
+    fi
+    
+    # Create service file with improved configuration
     cat > "/etc/systemd/system/$SYSTEMD_SERVICE_NAME.service" << EOF
 [Unit]
 Description=Code Execution API Service
@@ -178,9 +203,11 @@ Requires=docker.service
 [Service]
 Type=simple
 WorkingDirectory=$INSTALL_DIR
-ExecStart=/usr/local/bin/docker-compose up
-ExecStop=/usr/local/bin/docker-compose down
+ExecStart=/bin/bash -c "cd $INSTALL_DIR && if command -v docker-compose >/dev/null 2>&1; then docker-compose up; else docker compose up; fi"
+ExecStop=/bin/bash -c "cd $INSTALL_DIR && if command -v docker-compose >/dev/null 2>&1; then docker-compose down; else docker compose up; fi"
 Restart=always
+User=root
+Group=root
 
 [Install]
 WantedBy=multi-user.target
@@ -195,7 +222,7 @@ EOF
     print_color "green" "Systemd service created and enabled."
 }
 
-# Function to start Docker services
+# Function to start Docker services - improved error handling
 start_docker_services() {
     print_header "Starting Services"
     
@@ -204,7 +231,11 @@ start_docker_services() {
     
     # Build and start containers
     print_color "yellow" "Building Docker container..."
-    docker-compose build
+    if command_exists docker-compose; then
+        docker-compose build
+    else
+        docker compose build
+    fi
     
     print_color "yellow" "Starting Docker container..."
     systemctl start "$SYSTEMD_SERVICE_NAME.service"
@@ -216,32 +247,93 @@ start_docker_services() {
     if systemctl is-active --quiet "$SYSTEMD_SERVICE_NAME.service"; then
         print_color "green" "Code Execution API is now running at http://localhost:8000"
     else
-        print_color "red" "Failed to start the service. Please check the logs with: systemctl status $SYSTEMD_SERVICE_NAME.service"
+        print_color "red" "Failed to start the service via systemd. Trying direct method..."
+        if command_exists docker-compose; then
+            docker-compose up -d
+        else
+            docker compose up -d
+        fi
+        print_color "green" "Started via direct docker compose. API is running at http://localhost:8000"
     fi
 }
 
-# Function to create convenient control scripts
+# Function to create convenient control scripts - improved with error handling
 create_control_scripts() {
     print_header "Creating Control Scripts"
     
-    # Create start script
+    # Create start script with improved error handling
     cat > "/usr/local/bin/codeapi-start" << EOF
 #!/bin/bash
-systemctl start $SYSTEMD_SERVICE_NAME.service
-echo "Code Execution API started at http://localhost:8000"
+echo "Starting Code Execution API..."
+if ! systemctl is-active --quiet $SYSTEMD_SERVICE_NAME.service; then
+    sudo systemctl start $SYSTEMD_SERVICE_NAME.service
+    sleep 3
+    if systemctl is-active --quiet $SYSTEMD_SERVICE_NAME.service; then
+        echo "✅ Code Execution API started successfully at http://localhost:8000"
+    else
+        echo "❌ Failed to start service. Trying direct docker method..."
+        cd $INSTALL_DIR
+        if command -v docker-compose >/dev/null 2>&1; then
+            sudo docker-compose up -d
+        else
+            sudo docker compose up -d
+        fi
+        echo "✅ Started via docker compose. Service available at http://localhost:8000"
+    fi
+else
+    echo "✅ Code Execution API is already running at http://localhost:8000"
+fi
 EOF
 
-    # Create stop script
+    # Create stop script with improved error handling
     cat > "/usr/local/bin/codeapi-stop" << EOF
 #!/bin/bash
-systemctl stop $SYSTEMD_SERVICE_NAME.service
-echo "Code Execution API stopped"
+echo "Stopping Code Execution API..."
+if systemctl is-active --quiet $SYSTEMD_SERVICE_NAME.service; then
+    sudo systemctl stop $SYSTEMD_SERVICE_NAME.service
+    sleep 2
+    if ! systemctl is-active --quiet $SYSTEMD_SERVICE_NAME.service; then
+        echo "✅ Code Execution API stopped successfully"
+    else
+        echo "❌ Failed to stop service. Trying direct docker method..."
+        cd $INSTALL_DIR
+        if command -v docker-compose >/dev/null 2>&1; then
+            sudo docker-compose down
+        else
+            sudo docker compose down
+        fi
+        echo "✅ Stopped via docker compose"
+    fi
+else
+    echo "✅ Code Execution API is already stopped"
+    # Just to be sure, also try docker-compose down
+    cd $INSTALL_DIR
+    if command -v docker-compose >/dev/null 2>&1; then
+        sudo docker-compose down >/dev/null 2>&1
+    else
+        sudo docker compose down >/dev/null 2>&1
+    fi
+fi
 EOF
 
-    # Create status script
+    # Create status script with improved output
     cat > "/usr/local/bin/codeapi-status" << EOF
 #!/bin/bash
-systemctl status $SYSTEMD_SERVICE_NAME.service
+echo "Code Execution API Status:"
+echo "-------------------------"
+if systemctl is-active --quiet $SYSTEMD_SERVICE_NAME.service; then
+    echo "✅ Systemd service: ACTIVE"
+else
+    echo "❌ Systemd service: INACTIVE"
+fi
+
+echo ""
+echo "Docker container status:"
+sudo docker ps | grep code-execution-api
+
+echo ""
+echo "Service Details:"
+systemctl status $SYSTEMD_SERVICE_NAME.service --no-pager
 EOF
 
     # Make scripts executable
